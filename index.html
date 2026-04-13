@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>报销管理平台</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: { 50: '#eff6ff', 100: '#dbeafe', 500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8' }
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-gray-50 min-h-screen">
+  <div id="app"></div>
+
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <script>
+    const { createApp, ref, reactive, computed, onMounted } = Vue
+
+    const STATUS_CONFIG = {
+      draft:     { label: '草稿',   color: 'bg-gray-100 text-gray-600',   dot: 'bg-gray-400',   step: 0 },
+      pending:   { label: '待审批', color: 'bg-yellow-100 text-yellow-700', dot: 'bg-yellow-400', step: 1 },
+      reviewing: { label: '审批中', color: 'bg-blue-100 text-blue-700',   dot: 'bg-blue-500',   step: 2 },
+      approved:  { label: '已通过', color: 'bg-green-100 text-green-700', dot: 'bg-green-500',  step: 3 },
+      rejected:  { label: '已拒绝', color: 'bg-red-100 text-red-700',     dot: 'bg-red-500',    step: 3 },
+      paid:      { label: '已打款', color: 'bg-purple-100 text-purple-700', dot: 'bg-purple-500', step: 4 },
+    }
+
+    const CATEGORY_OPTIONS = ['差旅费', '餐饮费', '交通费', '办公用品', '培训费', '招待费', '其他']
+
+    const DEMO_DATA = [
+      { id: 'BX2026001', title: '北京出差报销', category: '差旅费', amount: 3280, date: '2026-03-20', status: 'paid',     items: [{name:'机票',amount:1680},{name:'酒店2晚',amount:960},{name:'交通',amount:640}], remark: '参加产品发布会', submitTime: '2026-03-22', approver: '王经理' },
+      { id: 'BX2026002', title: '3月团队聚餐',  category: '餐饮费', amount: 1560, date: '2026-03-28', status: 'approved', items: [{name:'餐厅消费',amount:1560}], remark: '季度团建', submitTime: '2026-03-29', approver: '李总监' },
+      { id: 'BX2026003', title: '客户招待晚宴',  category: '招待费', amount: 4200, date: '2026-04-02', status: 'reviewing',items: [{name:'餐费',amount:3200},{name:'礼品',amount:1000}], remark: '重要客户来访', submitTime: '2026-04-03', approver: '张副总' },
+      { id: 'BX2026004', title: '办公耗材采购',  category: '办公用品',amount: 890,  date: '2026-04-05', status: 'pending',  items: [{name:'打印纸',amount:320},{name:'墨盒',amount:570}], remark: '', submitTime: '2026-04-05', approver: '' },
+      { id: 'BX2026005', title: '上海培训费用',  category: '培训费', amount: 5800, date: '2026-04-01', status: 'rejected', items: [{name:'培训费',amount:5800}], remark: '需补充发票', submitTime: '2026-04-02', approver: '王经理' },
+    ]
+
+    const App = {
+      setup() {
+        const page = ref('list')  // list | create | detail
+        const records = ref(JSON.parse(localStorage.getItem('bx_records') || 'null') || DEMO_DATA)
+        const activeRecord = ref(null)
+        const filterStatus = ref('all')
+        const searchKey = ref('')
+        const toast = ref({ show: false, msg: '', type: 'success' })
+
+        // 创建表单
+        const form = reactive({
+          title: '', category: '差旅费', amount: '', date: '', remark: '',
+          items: [{ name: '', amount: '' }]
+        })
+        const formErrors = reactive({})
+
+        const saveRecords = () => localStorage.setItem('bx_records', JSON.stringify(records.value))
+
+        const showToast = (msg, type = 'success') => {
+          toast.value = { show: true, msg, type }
+          setTimeout(() => toast.value.show = false, 2500)
+        }
+
+        const filteredRecords = computed(() => {
+          return records.value.filter(r => {
+            const matchStatus = filterStatus.value === 'all' || r.status === filterStatus.value
+            const matchSearch = !searchKey.value || r.title.includes(searchKey.value) || r.id.includes(searchKey.value)
+            return matchStatus && matchSearch
+          }).sort((a, b) => b.id.localeCompare(a.id))
+        })
+
+        const stats = computed(() => {
+          const all = records.value
+          return {
+            total: all.length,
+            pending: all.filter(r => ['pending','reviewing'].includes(r.status)).length,
+            approved: all.filter(r => r.status === 'approved').length,
+            paid: all.filter(r => r.status === 'paid').length,
+            totalAmount: all.filter(r => r.status !== 'rejected').reduce((s, r) => s + r.amount, 0)
+          }
+        })
+
+        const addItem = () => form.items.push({ name: '', amount: '' })
+        const removeItem = (i) => { if (form.items.length > 1) form.items.splice(i, 1) }
+
+        const calcTotal = computed(() =>
+          form.items.reduce((s, it) => s + (parseFloat(it.amount) || 0), 0)
+        )
+
+        const validateForm = () => {
+          const errs = {}
+          if (!form.title.trim()) errs.title = '请填写报销标题'
+          if (!form.date) errs.date = '请选择报销日期'
+          form.items.forEach((it, i) => {
+            if (!it.name.trim()) errs[`item_name_${i}`] = '请填写费用名称'
+            if (!it.amount || isNaN(it.amount) || +it.amount <= 0) errs[`item_amt_${i}`] = '请填写有效金额'
+          })
+          Object.assign(formErrors, errs)
+          Object.keys(formErrors).forEach(k => { if (!errs[k]) delete formErrors[k] })
+          return Object.keys(errs).length === 0
+        }
+
+        const submitForm = (isDraft) => {
+          if (!isDraft && !validateForm()) return
+          const id = 'BX' + new Date().getFullYear() + String(records.value.length + 1).padStart(3, '0')
+          const newRecord = {
+            id,
+            title: form.title || '未命名报销单',
+            category: form.category,
+            amount: calcTotal.value,
+            date: form.date || new Date().toISOString().slice(0,10),
+            status: isDraft ? 'draft' : 'pending',
+            items: form.items.map(it => ({ name: it.name, amount: parseFloat(it.amount) || 0 })),
+            remark: form.remark,
+            submitTime: new Date().toLocaleDateString('zh-CN'),
+            approver: ''
+          }
+          records.value.unshift(newRecord)
+          saveRecords()
+          showToast(isDraft ? '草稿已保存' : '报销单已提交，等待审批')
+          resetForm()
+          page.value = 'list'
+        }
+
+        const resetForm = () => {
+          form.title = ''; form.category = '差旅费'; form.amount = ''
+          form.date = ''; form.remark = ''; form.items = [{ name: '', amount: '' }]
+          Object.keys(formErrors).forEach(k => delete formErrors[k])
+        }
+
+        const openDetail = (r) => { activeRecord.value = r; page.value = 'detail' }
+
+        const deleteRecord = (id) => {
+          if (!confirm('确认删除该报销单？')) return
+          records.value = records.value.filter(r => r.id !== id)
+          saveRecords()
+          showToast('已删除', 'info')
+          page.value = 'list'
+        }
+
+        const submitDraft = (r) => {
+          r.status = 'pending'; r.submitTime = new Date().toLocaleDateString('zh-CN')
+          saveRecords(); showToast('已提交审批')
+        }
+
+        const genId = () => `BX${new Date().getFullYear()}${String(records.value.length + 1).padStart(3, '0')}`
+
+        return {
+          page, records, activeRecord, filterStatus, searchKey, toast,
+          form, formErrors, filteredRecords, stats, calcTotal,
+          STATUS_CONFIG, CATEGORY_OPTIONS,
+          addItem, removeItem, submitForm, resetForm, openDetail,
+          deleteRecord, submitDraft, saveRecords, showToast
+        }
+      },
+
+      template: `
+      <div class="min-h-screen bg-gray-50">
+        <!-- 顶栏 -->
+        <header class="bg-white border-b border-gray-200 sticky top-0 z-30 shadow-sm">
+          <div class="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+              <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
+                <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                </svg>
+              </div>
+              <span class="font-semibold text-gray-800 text-lg">报销管理平台</span>
+            </div>
+            <button v-if="page !== 'create'" @click="page='create'; resetForm()"
+              class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg flex items-center gap-1.5 transition-colors">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+              新建报销单
+            </button>
+            <button v-else @click="page='list'" class="text-gray-500 hover:text-gray-700 text-sm flex items-center gap-1">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>返回列表
+            </button>
+          </div>
+        </header>
+
+        <!-- Toast -->
+        <transition enter-active-class="transition-all duration-300" enter-from-class="opacity-0 translate-y-2" leave-active-class="transition-all duration-200" leave-to-class="opacity-0">
+          <div v-if="toast.show" class="fixed top-16 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-xl shadow-lg text-sm font-medium flex items-center gap-2"
+            :class="toast.type==='success'?'bg-green-600 text-white':toast.type==='info'?'bg-gray-700 text-white':'bg-red-600 text-white'">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+            {{toast.msg}}
+          </div>
+        </transition>
+
+        <div class="max-w-5xl mx-auto px-4 py-6">
+
+          <!-- ===== 列表页 ===== -->
+          <template v-if="page === 'list'">
+            <!-- 统计卡片 -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+              <div class="bg-white rounded-xl p-4 shadow-sm border border-gray-100">
+                <p class="text-xs text-gray-500 mb-1">全部报销单</p>
+                <p class="text-2xl font-bold text-gray-800">{{ stats.total }}</p>
+              </div>
+              <div class="bg-white rounded-xl p-4 shadow-sm border border-gray-100">
+                <p class="text-xs text-gray-500 mb-1">审批中</p>
+                <p class="text-2xl font-bold text-yellow-500">{{ stats.pending }}</p>
+              </div>
+              <div class="bg-white rounded-xl p-4 shadow-sm border border-gray-100">
+                <p class="text-xs text-gray-500 mb-1">已通过</p>
+                <p class="text-2xl font-bold text-green-600">{{ stats.approved + stats.paid }}</p>
+              </div>
+              <div class="bg-white rounded-xl p-4 shadow-sm border border-gray-100">
+                <p class="text-xs text-gray-500 mb-1">累计报销金额</p>
+                <p class="text-2xl font-bold text-blue-600">¥{{ stats.totalAmount.toLocaleString() }}</p>
+              </div>
+            </div>
+
+            <!-- 筛选栏 -->
+            <div class="bg-white rounded-xl p-4 mb-4 shadow-sm border border-gray-100 flex flex-wrap gap-3 items-center">
+              <input v-model="searchKey" placeholder="搜索报销单名称或编号" class="flex-1 min-w-[160px] text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400"/>
+              <div class="flex flex-wrap gap-2">
+                <button v-for="(label, val) in {all:'全部', draft:'草稿', pending:'待审批', reviewing:'审批中', approved:'已通过', rejected:'已拒绝', paid:'已打款'}" :key="val"
+                  @click="filterStatus = val"
+                  :class="filterStatus===val?'bg-blue-600 text-white':'bg-gray-100 text-gray-600 hover:bg-gray-200'"
+                  class="text-xs px-3 py-1.5 rounded-full transition-colors cursor-pointer">{{ label }}</button>
+              </div>
+            </div>
+
+            <!-- 列表 -->
+            <div class="space-y-3">
+              <div v-if="filteredRecords.length === 0" class="bg-white rounded-xl p-12 text-center text-gray-400 shadow-sm border border-gray-100">
+                <svg class="w-12 h-12 mx-auto mb-3 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                <p>暂无报销记录</p>
+              </div>
+              <div v-for="r in filteredRecords" :key="r.id" @click="openDetail(r)"
+                class="bg-white rounded-xl p-4 shadow-sm border border-gray-100 hover:shadow-md hover:border-blue-200 cursor-pointer transition-all flex items-center gap-4">
+                <div class="w-10 h-10 rounded-lg bg-blue-50 flex items-center justify-center flex-shrink-0">
+                  <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2 mb-0.5">
+                    <span class="font-medium text-gray-800 text-sm truncate">{{ r.title }}</span>
+                    <span class="text-xs px-2 py-0.5 rounded-full flex-shrink-0" :class="STATUS_CONFIG[r.status].color">{{ STATUS_CONFIG[r.status].label }}</span>
+                  </div>
+                  <p class="text-xs text-gray-400">{{ r.id }} · {{ r.category }} · {{ r.date }}</p>
+                </div>
+                <div class="text-right flex-shrink-0">
+                  <p class="font-bold text-gray-800">¥{{ r.amount.toLocaleString() }}</p>
+                  <button v-if="r.status==='draft'" @click.stop="submitDraft(r)"
+                    class="text-xs text-blue-600 hover:text-blue-800 mt-0.5">提交审批 →</button>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- ===== 创建页 ===== -->
+          <template v-else-if="page === 'create'">
+            <div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+              <div class="px-6 py-4 border-b border-gray-100 bg-gradient-to-r from-blue-50 to-white">
+                <h2 class="font-semibold text-gray-800">新建报销单</h2>
+                <p class="text-xs text-gray-500 mt-0.5">填写报销信息后提交审批，或保存为草稿</p>
+              </div>
+              <div class="p-6 space-y-5">
+                <!-- 基础信息 -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label class="text-sm font-medium text-gray-700 mb-1.5 block">报销标题 <span class="text-red-500">*</span></label>
+                    <input v-model="form.title" placeholder="如：北京出差报销" class="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400" :class="formErrors.title?'border-red-400':'border-gray-200'"/>
+                    <p v-if="formErrors.title" class="text-xs text-red-500 mt-1">{{ formErrors.title }}</p>
+                  </div>
+                  <div>
+                    <label class="text-sm font-medium text-gray-700 mb-1.5 block">费用类别</label>
+                    <select v-model="form.category" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-blue-200 bg-white">
+                      <option v-for="c in CATEGORY_OPTIONS" :key="c">{{ c }}</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="text-sm font-medium text-gray-700 mb-1.5 block">报销日期 <span class="text-red-500">*</span></label>
+                    <input type="date" v-model="form.date" class="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400" :class="formErrors.date?'border-red-400':'border-gray-200'"/>
+                    <p v-if="formErrors.date" class="text-xs text-red-500 mt-1">{{ formErrors.date }}</p>
+                  </div>
+                  <div>
+                    <label class="text-sm font-medium text-gray-700 mb-1.5 block">备注说明</label>
+                    <input v-model="form.remark" placeholder="可选，如出差原因等" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-blue-200"/>
+                  </div>
+                </div>
+
+                <!-- 费用明细 -->
+                <div>
+                  <div class="flex items-center justify-between mb-3">
+                    <label class="text-sm font-medium text-gray-700">费用明细 <span class="text-red-500">*</span></label>
+                    <button @click="addItem" class="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1">
+                      <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>添加明细
+                    </button>
+                  </div>
+                  <div class="space-y-2">
+                    <div v-for="(item, i) in form.items" :key="i" class="flex gap-2 items-start">
+                      <div class="flex-1">
+                        <input v-model="item.name" :placeholder="'费用名称，如机票'" class="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400" :class="formErrors['item_name_'+i]?'border-red-400':'border-gray-200'"/>
+                      </div>
+                      <div class="w-32">
+                        <div class="relative">
+                          <span class="absolute left-3 top-2 text-gray-400 text-sm">¥</span>
+                          <input v-model="item.amount" type="number" min="0" placeholder="0.00" class="w-full text-sm border rounded-lg pl-7 pr-3 py-2 outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-400" :class="formErrors['item_amt_'+i]?'border-red-400':'border-gray-200'"/>
+                        </div>
+                      </div>
+                      <button @click="removeItem(i)" class="mt-2 text-gray-300 hover:text-red-400 transition-colors flex-shrink-0">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                      </button>
+                    </div>
+                  </div>
+                  <div class="mt-3 flex justify-end items-center gap-2 text-sm text-gray-600 bg-gray-50 rounded-lg p-3">
+                    <span>合计：</span>
+                    <span class="text-xl font-bold text-blue-600">¥{{ calcTotal.toFixed(2) }}</span>
+                  </div>
+                </div>
+
+                <!-- 操作按钮 -->
+                <div class="flex gap-3 pt-2">
+                  <button @click="submitForm(true)" class="flex-1 border border-gray-300 text-gray-700 hover:bg-gray-50 py-2.5 rounded-lg text-sm font-medium transition-colors">保存草稿</button>
+                  <button @click="submitForm(false)" class="flex-2 bg-blue-600 hover:bg-blue-700 text-white py-2.5 px-8 rounded-lg text-sm font-medium transition-colors">提交审批</button>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- ===== 详情页 ===== -->
+          <template v-else-if="page === 'detail' && activeRecord">
+            <div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+              <!-- 标题栏 -->
+              <div class="px-6 py-5 border-b border-gray-100">
+                <div class="flex items-start justify-between">
+                  <div>
+                    <div class="flex items-center gap-3 mb-1">
+                      <h2 class="font-semibold text-gray-800 text-lg">{{ activeRecord.title }}</h2>
+                      <span class="text-xs px-2.5 py-1 rounded-full font-medium" :class="STATUS_CONFIG[activeRecord.status].color">{{ STATUS_CONFIG[activeRecord.status].label }}</span>
+                    </div>
+                    <p class="text-sm text-gray-400">{{ activeRecord.id }} · {{ activeRecord.category }} · {{ activeRecord.date }}</p>
+                  </div>
+                  <p class="text-2xl font-bold text-blue-600">¥{{ activeRecord.amount.toLocaleString() }}</p>
+                </div>
+              </div>
+
+              <!-- 进度条 -->
+              <div class="px-6 py-5 border-b border-gray-100 bg-gray-50">
+                <p class="text-xs font-medium text-gray-500 mb-4">报销进度</p>
+                <div class="relative">
+                  <div class="absolute top-3.5 left-4 right-4 h-0.5 bg-gray-200"></div>
+                  <div class="absolute top-3.5 left-4 h-0.5 bg-blue-500 transition-all duration-500"
+                    :style="{width: activeRecord.status==='rejected' ? '60%' : ['draft','pending','reviewing','approved','paid'].indexOf(activeRecord.status)/4*100+'%'}"></div>
+                  <div class="relative flex justify-between">
+                    <div v-for="(step, i) in ['提交','待审批','审批中','审核完成','已打款']" :key="i" class="flex flex-col items-center gap-1.5 flex-1">
+                      <div class="w-7 h-7 rounded-full border-2 flex items-center justify-center text-xs font-bold z-10 transition-all"
+                        :class="getStepClass(activeRecord.status, i)">
+                        <svg v-if="isStepDone(activeRecord.status, i)" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/></svg>
+                        <span v-else>{{ i+1 }}</span>
+                      </div>
+                      <span class="text-xs text-gray-500 text-center leading-tight">{{ step }}</span>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="activeRecord.status === 'rejected'" class="mt-3 flex items-center gap-2 text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
+                  <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                  审批已拒绝{{ activeRecord.remark ? '：' + activeRecord.remark : '，请联系审批人了解原因' }}
+                </div>
+              </div>
+
+              <!-- 详细信息 -->
+              <div class="px-6 py-5 grid md:grid-cols-2 gap-6">
+                <div>
+                  <p class="text-xs font-medium text-gray-500 mb-3">报销信息</p>
+                  <div class="space-y-2.5 text-sm">
+                    <div class="flex justify-between"><span class="text-gray-500">提交时间</span><span class="text-gray-800">{{ activeRecord.submitTime || '—' }}</span></div>
+                    <div class="flex justify-between"><span class="text-gray-500">审批人</span><span class="text-gray-800">{{ activeRecord.approver || '待指定' }}</span></div>
+                    <div class="flex justify-between"><span class="text-gray-500">备注</span><span class="text-gray-800">{{ activeRecord.remark || '—' }}</span></div>
+                  </div>
+                </div>
+                <div>
+                  <p class="text-xs font-medium text-gray-500 mb-3">费用明细</p>
+                  <div class="space-y-2">
+                    <div v-for="(it, i) in activeRecord.items" :key="i" class="flex justify-between text-sm">
+                      <span class="text-gray-600">{{ it.name }}</span>
+                      <span class="font-medium text-gray-800">¥{{ it.amount.toLocaleString() }}</span>
+                    </div>
+                    <div class="border-t border-dashed border-gray-200 pt-2 flex justify-between text-sm font-semibold">
+                      <span>合计</span><span class="text-blue-600">¥{{ activeRecord.amount.toLocaleString() }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 操作 -->
+              <div class="px-6 py-4 border-t border-gray-100 bg-gray-50 flex gap-3">
+                <button v-if="activeRecord.status==='draft'" @click="submitDraft(activeRecord); page='list'"
+                  class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-5 py-2 rounded-lg transition-colors">提交审批</button>
+                <button v-if="['draft','rejected'].includes(activeRecord.status)" @click="deleteRecord(activeRecord.id)"
+                  class="border border-red-200 text-red-500 hover:bg-red-50 text-sm px-5 py-2 rounded-lg transition-colors">删除</button>
+                <button @click="page='list'" class="border border-gray-200 text-gray-600 hover:bg-gray-100 text-sm px-5 py-2 rounded-lg transition-colors ml-auto">返回列表</button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+      `,
+
+      methods: {
+        getStepClass(status, stepIdx) {
+          const curStep = this.STATUS_CONFIG[status].step
+          const isRejected = status === 'rejected'
+          if (isRejected && stepIdx === 2) return 'border-red-500 bg-red-500 text-white'
+          if (stepIdx < curStep) return 'border-blue-500 bg-blue-500 text-white'
+          if (stepIdx === curStep && !isRejected) return 'border-blue-500 bg-blue-50 text-blue-600'
+          return 'border-gray-300 bg-white text-gray-400'
+        },
+        isStepDone(status, stepIdx) {
+          const curStep = this.STATUS_CONFIG[status].step
+          return stepIdx < curStep && status !== 'rejected'
+        }
+      }
+    }
+
+    createApp(App).mount('#app')
+  </script>
+</body>
+</html>
