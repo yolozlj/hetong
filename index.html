@@ -84,7 +84,7 @@
           localStorage.removeItem('sso_jwt')
           currentUser.value = null
           authState.value = 'checking'
-          window.location.href = SSO_LOGIN_URL + '?redirect_url=' + encodeURIComponent(window.location.origin + window.location.pathname)
+          window.location.href = SSO_LOGIN_URL
         }
 
         onMounted(async () => {
@@ -121,7 +121,7 @@
           }
 
           // 3. 未登录，跳转 SSO
-          window.location.href = SSO_LOGIN_URL + '?redirect_url=' + encodeURIComponent(window.location.href)
+          window.location.href = SSO_LOGIN_URL
         })
 
         // 创建表单
