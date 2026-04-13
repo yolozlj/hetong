@@ -24,6 +24,29 @@
   <script>
     const { createApp, ref, reactive, computed, onMounted } = Vue
 
+    // ── SSO 配置 ──────────────────────────────────────────
+    const SSO_APP_ID   = '1476059454'
+    const FC_BASE      = 'https://sso-mhgaaesiy.cn-hangzhou.fcapp.run'
+    const SSO_LOGIN_URL = `https://sso.100tal.com/portal/login/${SSO_APP_ID}`
+
+    function decodeJWT(token) {
+      try {
+        const payload = token.split('.')[1]
+        return JSON.parse(atob(payload.replace(/-/g,'+').replace(/_/g,'/')))
+      } catch { return null }
+    }
+
+    function getSavedAuth() {
+      const token = localStorage.getItem('sso_jwt')
+      if (!token) return null
+      const payload = decodeJWT(token)
+      if (!payload || payload.exp * 1000 < Date.now()) {
+        localStorage.removeItem('sso_jwt')
+        return null
+      }
+      return { token, user: payload }
+    }
+
     const STATUS_CONFIG = {
       draft:     { label: '草稿',   color: 'bg-gray-100 text-gray-600',   dot: 'bg-gray-400',   step: 0 },
       pending:   { label: '待审批', color: 'bg-yellow-100 text-yellow-700', dot: 'bg-yellow-400', step: 1 },
@@ -51,6 +74,55 @@
         const filterStatus = ref('all')
         const searchKey = ref('')
         const toast = ref({ show: false, msg: '', type: 'success' })
+
+        // ── 登录态 ──────────────────────────────────────────
+        const authState = ref('checking')   // checking | logged-in | error
+        const currentUser = ref(null)
+        const authError = ref('')
+
+        const logout = () => {
+          localStorage.removeItem('sso_jwt')
+          currentUser.value = null
+          authState.value = 'checking'
+          window.location.href = SSO_LOGIN_URL + '?redirect_url=' + encodeURIComponent(window.location.origin + window.location.pathname)
+        }
+
+        onMounted(async () => {
+          // 1. 已有本地 JWT，直接进入
+          const saved = getSavedAuth()
+          if (saved) {
+            currentUser.value = saved.user
+            authState.value = 'logged-in'
+            return
+          }
+
+          // 2. SSO 回调携带 token 参数
+          const params = new URLSearchParams(window.location.search)
+          const ssoToken = params.get('token')
+          if (ssoToken) {
+            // 清除 URL 中的 token，避免刷新重复请求
+            history.replaceState({}, '', window.location.pathname)
+            try {
+              const res = await fetch(`${FC_BASE}/auth/callback?token=${encodeURIComponent(ssoToken)}`)
+              const data = await res.json()
+              if (data.token) {
+                localStorage.setItem('sso_jwt', data.token)
+                currentUser.value = decodeJWT(data.token)
+                authState.value = 'logged-in'
+              } else {
+                authError.value = data.error || '身份验证失败，请重试'
+                authState.value = 'error'
+              }
+            } catch (e) {
+              authError.value = '网络错误，无法连接认证服务'
+              authState.value = 'error'
+            }
+            return
+          }
+
+          // 3. 未登录，跳转 SSO
+          window.location.href = SSO_LOGIN_URL + '?redirect_url=' + encodeURIComponent(window.location.href)
+        })
 
         // 创建表单
         const form = reactive({
@@ -155,12 +227,42 @@
           form, formErrors, filteredRecords, stats, calcTotal,
           STATUS_CONFIG, CATEGORY_OPTIONS,
           addItem, removeItem, submitForm, resetForm, openDetail,
-          deleteRecord, submitDraft, saveRecords, showToast
+          deleteRecord, submitDraft, saveRecords, showToast,
+          authState, currentUser, authError, logout
         }
       },
 
       template: `
       <div class="min-h-screen bg-gray-50">
+
+        <!-- 认证中 / 跳转中 -->
+        <div v-if="authState === 'checking'" class="min-h-screen flex flex-col items-center justify-center gap-4 text-gray-500">
+          <svg class="w-10 h-10 animate-spin text-blue-500" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+          </svg>
+          <p class="text-sm">正在验证身份，请稍候…</p>
+        </div>
+
+        <!-- 认证错误 -->
+        <div v-else-if="authState === 'error'" class="min-h-screen flex flex-col items-center justify-center gap-4">
+          <div class="bg-white rounded-2xl shadow-sm border border-red-100 p-8 max-w-sm w-full mx-4 text-center">
+            <div class="w-14 h-14 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-4">
+              <svg class="w-7 h-7 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              </svg>
+            </div>
+            <p class="font-semibold text-gray-800 mb-1">登录失败</p>
+            <p class="text-sm text-gray-500 mb-5">{{ authError }}</p>
+            <button @click="logout" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-6 py-2.5 rounded-lg transition-colors">
+              重新登录
+            </button>
+          </div>
+        </div>
+
+        <!-- 主应用（已登录） -->
+        <template v-else-if="authState === 'logged-in'">
+
         <!-- 顶栏 -->
         <header class="bg-white border-b border-gray-200 sticky top-0 z-30 shadow-sm">
           <div class="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
@@ -172,14 +274,28 @@
               </div>
               <span class="font-semibold text-gray-800 text-lg">报销管理平台</span>
             </div>
-            <button v-if="page !== 'create'" @click="page='create'; resetForm()"
-              class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg flex items-center gap-1.5 transition-colors">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
-              新建报销单
-            </button>
-            <button v-else @click="page='list'" class="text-gray-500 hover:text-gray-700 text-sm flex items-center gap-1">
-              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>返回列表
-            </button>
+            <div class="flex items-center gap-3">
+              <button v-if="page !== 'create'" @click="page='create'; resetForm()"
+                class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg flex items-center gap-1.5 transition-colors">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                新建报销单
+              </button>
+              <button v-else @click="page='list'" class="text-gray-500 hover:text-gray-700 text-sm flex items-center gap-1">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>返回列表
+              </button>
+              <!-- 用户信息 -->
+              <div class="flex items-center gap-2 pl-3 border-l border-gray-200">
+                <div class="w-7 h-7 rounded-full bg-blue-100 flex items-center justify-center text-xs font-bold text-blue-600">
+                  {{ currentUser?.name?.slice(0,1) || '我' }}
+                </div>
+                <span class="text-sm text-gray-700 hidden sm:block">{{ currentUser?.name }}</span>
+                <button @click="logout" class="text-xs text-gray-400 hover:text-red-500 transition-colors ml-1" title="退出登录">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h6a2 2 0 012 2v1"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
           </div>
         </header>
 
@@ -401,6 +517,7 @@
             </div>
           </template>
         </div>
+        </template><!-- end logged-in -->
       </div>
       `,
 
